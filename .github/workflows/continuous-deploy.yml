@@ -1,0 +1,324 @@
+name: Continuous Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'manifest'
+      
+jobs:
+  deploy-roku:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          
+      - name: Install roku-deploy
+        run: npm install roku-deploy
+        
+      - name: Get version from manifest
+        id: get_version
+        run: |
+          if [ -f "manifest" ]; then
+            VERSION=$(grep -E "^major_version=" manifest | cut -d'=' -f2 | sed 's/^0*//')
+            MINOR=$(grep -E "^minor_version=" manifest | cut -d'=' -f2 | sed 's/^0*//')
+            BUILD=$(grep -E "^build_version=" manifest | cut -d'=' -f2 | sed 's/^0*//')
+            
+            # Handle case where version component is just "0" or empty after removing leading zeros
+            VERSION=${VERSION:-0}
+            MINOR=${MINOR:-0}
+            BUILD=${BUILD:-0}
+            
+            FULL_VERSION="${VERSION}.${MINOR}.${BUILD}"
+            echo "version=$FULL_VERSION" >> $GITHUB_OUTPUT
+            echo "Extracted version from manifest: $FULL_VERSION"
+          else
+            echo "Error: manifest file not found"
+            exit 1
+          fi
+        
+      - name: Get latest release
+        id: get_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            if (releases.length === 0) {
+              throw new Error('No releases found');
+            }
+            
+            const latestRelease = releases[0];
+            console.log(`Latest release: ${latestRelease.tag_name}`);
+            
+            // Find the .pkg file in assets
+            const pkgAsset = latestRelease.assets.find(asset => 
+              asset.name.endsWith('.pkg')
+            );
+            
+            if (!pkgAsset) {
+              throw new Error('No .pkg file found in latest release assets');
+            }
+            
+            core.setOutput('download_url', pkgAsset.url);
+            core.setOutput('filename', pkgAsset.name);
+            core.setOutput('tag_name', latestRelease.tag_name);
+            
+            return {
+              download_url: pkgAsset.url,
+              filename: pkgAsset.name,
+              tag_name: latestRelease.tag_name
+            };
+            
+      - name: Download release package
+        run: |
+          echo "Downloading ${{ steps.get_release.outputs.filename }} from release ${{ steps.get_release.outputs.tag_name }}"
+          wget --header="Authorization: Bearer ${{ secrets.PERSONAL_TOKEN  }}" \
+               --header="Accept: application/octet-stream" \
+               -O "${{ steps.get_release.outputs.filename }}" \
+               "${{ steps.get_release.outputs.download_url }}"
+          ls -la *.pkg
+
+      - name: Install client
+        run: |
+          sudo apt update
+          sudo apt install -y openvpn
+          
+      - name: Create connection profile
+        run: |
+          echo "$HOTTLABS_CONNECTION" | base64 -d > ~/hottlabs.ovpn
+          
+          # Permissions
+          chmod 600 ~/hottlabs.ovpn
+        env:
+          HOTTLABS_CONNECTION: ${{ secrets.HOTTLABS_CONNECTION }}
+
+      - name: Connect to Hott Labs
+        run: |
+          sudo openvpn --config ~/hottlabs.ovpn &
+        
+      - name: Wait and verify
+        run: |
+          echo "Waiting for connection..."
+          sleep 15
+          ip a
+
+      - name: Ping Roku device
+        run: |
+          ping -c 5 ${{ vars.ROKU_HOSTNAME }}
+
+      - name: Create rekey script
+        run: |
+          cat > rekey.js << 'EOF'
+          const rokuDeploy = require('roku-deploy');
+          
+          async function rekeyDevice() {
+            try {
+              const options = {
+                host: '${{ vars.ROKU_HOSTNAME }}',
+                password: process.env.ROKU_DEV_PASSWORD,
+                rekeySignedPackage: process.env.PKG_FILE,
+                signingPassword: process.env.ROKU_SIGNING_PASSWORD
+              };
+              
+              console.log(`Rekeying device with options: ${JSON.stringify(options)}`);
+              console.log(`Rekeying device with package: ${options.rekeySignedPackage}`);
+              
+              const result = await rokuDeploy.rekeyDevice(options);
+              console.log('Rekey successful:', result);
+              
+              // Return the signed package path for download
+              return result;
+            } catch (error) {
+              console.error('Rekey failed:', error);
+              process.exit(1);
+            }
+          }
+          
+          rekeyDevice();
+          EOF
+          
+      - name: Rekey Roku device with previous package
+        run: |
+          echo "Rekeying Roku device with ${{ steps.get_release.outputs.filename }}"
+          node rekey.js
+        env:
+          ROKU_DEV_PASSWORD: ${{ secrets.ROKU_DEV_PASSWORD }}
+          ROKU_SIGNING_PASSWORD: ${{ secrets.ROKU_SIGNING_PASSWORD }}
+          PKG_FILE: ${{ steps.get_release.outputs.filename }}
+
+      - name: Deploy to Roku device
+        run: |
+          ls -la
+          make install
+        env:
+          DEVPASSWORD: ${{ secrets.ROKU_DEV_PASSWORD }}
+          ROKU_DEV_TARGET: ${{ vars.ROKU_HOSTNAME }}
+
+      - name: Sign and retrieve signed package
+        run: |
+          echo "Signing package and retrieving signed version from Roku device..."
+          
+          # Create script to sign existing package and get download URL
+          cat > sign_and_get_url.js << 'EOF'
+          const rokuDeploy = require('roku-deploy');
+          const fs = require('fs');
+          const path = require('path');
+          
+          async function signAndGetDownloadUrl() {
+            try {
+              const options = {
+                host: '${{ vars.ROKU_HOSTNAME }}',
+                password: process.env.ROKU_DEV_PASSWORD,
+                signingPassword: process.env.ROKU_SIGNING_PASSWORD,
+                // Point to the root directory where manifest is located
+                rootDir: process.cwd(),
+                // Specify the manifest path explicitly
+                manifestPath: path.join(process.cwd(), 'manifest'),
+                // Use stagingFolderPath to avoid conflicts
+                stagingFolderPath: path.join(process.cwd(), 'out', '.roku-deploy-staging')
+              };
+              
+              console.log('Signing existing package on device...');
+              console.log(`Root directory: ${options.rootDir}`);
+              console.log(`Manifest path: ${options.manifestPath}`);
+              console.log(`Staging path: ${options.stagingFolderPath}`);
+              
+              // Ensure the staging directory exists and copy manifest
+              if (!fs.existsSync(options.stagingFolderPath)) {
+                fs.mkdirSync(options.stagingFolderPath, { recursive: true });
+              }
+              
+              // Copy manifest to staging directory
+              if (fs.existsSync(options.manifestPath)) {
+                const stagingManifest = path.join(options.stagingFolderPath, 'manifest');
+                fs.copyFileSync(options.manifestPath, stagingManifest);
+                console.log(`Copied manifest to staging: ${stagingManifest}`);
+              } else {
+                throw new Error(`Manifest not found at: ${options.manifestPath}`);
+              }
+              
+              // Sign the existing package on the device - this returns a packagePath
+              console.log('Calling signExistingPackage...');
+              const packagePath = await rokuDeploy.signExistingPackage(options);
+              console.log(`Package signed successfully. Package path: ${packagePath}`);
+              
+              // Get the download URL for the signed package
+              console.log('Getting download URL for signed package...');
+              const retrieveOptions = {
+                host: '${{ vars.ROKU_HOSTNAME }}',
+                password: process.env.ROKU_DEV_PASSWORD
+              };
+              
+              console.log(`Getting URL from host: ${retrieveOptions.host}`);
+              console.log(`Using package path: ${packagePath}`);
+              
+              // retrieveSignedPackage returns the download URL, not the package data
+              const downloadUrl = `http://${{ vars.ROKU_HOSTNAME }}/${packagePath}`;
+              console.log(`Download URL obtained: ${downloadUrl}`);
+              
+              // Generate filename using version from manifest
+              const version = process.env.VERSION;
+              const originalFilename = process.env.ORIGINAL_FILENAME;
+              
+              // Extract base name without version and extension
+              const baseNameMatch = originalFilename.match(/^(.+?)(?:[_-]v?[0-9]+\.[0-9]+\.[0-9]+)?\.pkg$/);
+              const baseName = baseNameMatch ? baseNameMatch[1] : originalFilename.replace('.pkg', '');
+              
+              const signedFilename = `${baseName}_v${version}.pkg`;
+              
+              console.log(`Manifest version: ${version}`);
+              console.log(`Target signed filename: ${signedFilename}`);
+              
+              // Output both the download URL and filename for the next step
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `download_url=${downloadUrl}\n`);
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `signed_filename=${signedFilename}\n`);
+              
+            } catch (error) {
+              console.error('Failed to sign package and get download URL:', error);
+              console.error('Error details:', error.message);
+              process.exit(1);
+            }
+          }
+          
+          signAndGetDownloadUrl();
+          EOF
+          
+          node sign_and_get_url.js
+        env:
+          ROKU_DEV_PASSWORD: ${{ secrets.ROKU_DEV_PASSWORD }}
+          ROKU_SIGNING_PASSWORD: ${{ secrets.ROKU_SIGNING_PASSWORD }}
+          PKG_FILE: ${{ steps.get_release.outputs.filename }}
+          ORIGINAL_FILENAME: ${{ steps.get_release.outputs.filename }}
+          VERSION: ${{ steps.get_version.outputs.version }}
+        id: sign_package
+
+      - name: Download signed package from Roku device
+        run: |
+          echo "Downloading signed package from Roku device..."
+          echo "Download URL: ${{ steps.sign_package.outputs.download_url }}"
+          echo "Target filename: ${{ steps.sign_package.outputs.signed_filename }}"
+          
+          # Download the signed package from the Roku device using wget
+          wget --user=rokudev \
+               --password="$ROKU_DEV_PASSWORD" \
+               --auth-no-challenge \
+               -O "${{ steps.sign_package.outputs.signed_filename }}" \
+               "${{ steps.sign_package.outputs.download_url }}"
+          
+          echo "Download completed. Verifying file..."
+          ls -la "${{ steps.sign_package.outputs.signed_filename }}"
+          
+          # Verify the file was downloaded and has content
+          if [ ! -f "${{ steps.sign_package.outputs.signed_filename }}" ]; then
+            echo "Error: Signed package file not found after download!"
+            exit 1
+          fi
+          
+          if [ ! -s "${{ steps.sign_package.outputs.signed_filename }}" ]; then
+            echo "Error: Signed package file is empty!"
+            exit 1
+          fi
+          
+          echo "Signed package downloaded successfully: ${{ steps.sign_package.outputs.signed_filename }}"
+          echo "File size: $(stat -f%z "${{ steps.sign_package.outputs.signed_filename }}" 2>/dev/null || stat -c%s "${{ steps.sign_package.outputs.signed_filename }}")" bytes
+        env:
+          ROKU_DEV_PASSWORD: ${{ secrets.ROKU_DEV_PASSWORD }}
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: "v${{ steps.get_version.outputs.version }}"
+          release_name: "Release ${{ steps.get_version.outputs.version }}"
+          body: |
+            Automated release of signed Roku package
+            
+            Version: ${{ steps.get_version.outputs.version }}
+            Signed package: ${{ steps.sign_package.outputs.signed_filename }}
+            
+            This package has been signed and is ready for production deployment.
+          draft: false
+          prerelease: false
+
+      - name: Upload Signed Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.sign_package.outputs.signed_filename }}
+          asset_name: ${{ steps.sign_package.outputs.signed_filename }}
+          asset_content_type: application/octet-stream

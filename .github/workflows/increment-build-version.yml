@@ -1,0 +1,32 @@
+name: Increment Build Version
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *'
+
+jobs:
+  increment-build-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PERSONAL_TOKEN }}
+          
+      - name: Increment build_version in manifest
+        run: |
+          file="manifest"
+          old=$(grep -E '^build_version=' "$file" | cut -d'=' -f2)
+          new=$(printf "%05d" $((10#$old + 1)))
+          sed -i "s/^build_version=$old$/build_version=$new/" "$file"
+
+      - name: Commit and push changes to branch
+        run: |
+          file="manifest"
+          new=$(grep -E '^build_version=' "$file" | cut -d'=' -f2)         
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@users.noreply.github.com"
+          git add "$file"
+          git commit -m "Increment Build Number to $new"
+          git push
