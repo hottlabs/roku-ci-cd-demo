@@ -131,7 +131,11 @@ endif
 
 # For a quick ping, we want the command to return success as soon as possible,
 # and a timeout failure in no more than a second or two.
-ifeq ($(HOST_OS),cygwin)
+
+ifeq ($(HOST_OS),macos)
+	# Mac
+	QUICK_PING_ARGS = -c 1 -W 1000
+else ifeq ($(HOST_OS),cygwin)
 	# This assumes that the Windows ping command is used, not cygwin's.
 	QUICK_PING_ARGS = -n 1 -w 1000
 else # Linux

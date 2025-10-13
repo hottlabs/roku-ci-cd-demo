@@ -15,9 +15,9 @@
 #    address of your Roku box. (e.g. export ROKU_DEV_TARGET=192.168.1.1.
 #    Set in your this variable in your shell startup (e.g. .bashrc)
 ##########################################################################  
-APPNAME = YourNameHere
+APPNAME = HelloHottLabs
 VERSION = 1.0
 
-ZIP_EXCLUDE= -x \*.pkg -x storeassets\* -x keys\* -x \*/.\*
+ZIP_EXCLUDE= -x \*.pkg -x dist\* -x app.mk -x makefile -x storeassets\* -x keys\* -x \*/.\* -x .\* -x node_modules\* -x package*.json
 
 include ./app.mk

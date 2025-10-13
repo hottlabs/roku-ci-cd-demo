@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="Hello" extends="Scene">
+  <children>
+    <LayoutGroup
+      id="verticalTextGroup"
+      layoutDirection="vert"
+      itemSpacings="[10]"
+      translation="[100, 100]">
+      <Label
+        id="title"
+        text="Hott Labs Demo"
+        font="font:MediumBoldSystemFont"
+        color="0x454545FF" />
+      <Label
+        id="desc"
+        text="this build was automatically deployed by a GitHub action. Learn more at hottlabs.com"
+        font="font:SmallBoldSystemFont"
+        color="0x454545FF" />
+      <Label
+        id="ver"
+        text="subtitle goes here"
+        font="font:SmallerBoldSystemFont"
+        color="0x454545FF" />
+    </LayoutGroup>
+  </children>
+  <!-- BrightScript Portion -->
+  <script type="text/brightscript">
+  <![CDATA[
+    '** 
+    '** Example: Edit a Label size and color with BrightScript
+    '**
+
+    function init()
+      m.top.setFocus(true)
+      m.title = m.top.findNode("title")
+      m.desc = m.top.findNode("desc")
+      m.ver = m.top.findNode("ver")
+      
+      'Set the font size
+      m.title.font.size=64
+      m.desc.font.size=24
+      m.ver.font.size=24
+
+      'Get Build Number
+      appInfo = CreateObject("roAppInfo")
+      m.ver.text = "v" + appInfo.GetVersion()
+
+      '**
+      '** The full list of editable attributes can be located at:
+      '** http://sdkdocs.roku.com/display/sdkdoc/Label#Label-Fields
+      '**
+    end function
+  ]]>
+</script>
+  <!-- End of BrightScript Portion -->
+</component>

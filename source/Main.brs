@@ -12,8 +12,10 @@ sub Main()
     m.port = CreateObject("roMessagePort")
     screen.setMessagePort(m.port)
 
-    'Create a scene and load /components/helloworld.xml'
-    scene = screen.CreateScene("HelloWorld")
+
+    'Create a scene and load /components/hello.xml'
+    scene = screen.CreateScene("Hello")
+    scene.backgroundURI = "pkg:/images/splash-screen_hd.png"
     screen.show()
 
     while(true)
